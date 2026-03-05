@@ -10,7 +10,7 @@ A ready-to-install userscript is available at:
 
 - Tracks canvas-rendered entities every frame.
 - Stores data in `window.__diepShapeState`.
-- Estimates current in-game zoom from WASM exports when available, with transform-scale fallback (`state.zoom`).
+- Estimates current in-game zoom from a background rectangle `transformScale` (empty-object fillStyle), calibrated with base scale `0.7120758295059204` for zoom=1.0, with additional fallbacks (`state.zoom`).
 - Differentiates entities by color + geometry:
   - `#FC7677` → triangle
   - `#768DFC` → pentagon
@@ -28,7 +28,6 @@ A ready-to-install userscript is available at:
 - `diepShapes.getBullets()`
 - `diepShapes.byType('playerSelf')`
 - `diepShapes.getZoom()`
-- `diepShapes.getWasmInfo()`
 - `diepShapes.enable()` / `diepShapes.disable()` / `diepShapes.clear()`
 
 ### Install

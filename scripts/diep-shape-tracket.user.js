@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Diep.io Shape Tracker
 // @namespace    https://diep.io/
-// @version      1.4.0
+// @version      1.5.0
 // @description  Capture rendered entities (shapes, players, bullets, cannons) and expose them in the browser console.
 // @author       codex
 // @match        https://diep.io/*
@@ -26,6 +26,8 @@
         cannon: '#999999',
       };
 
+      const BACKGROUND_RECT_BASE_SCALE = 0.7120758295059204;
+
       const trackerState = {
         enabled: true,
         frame: 0,
@@ -36,7 +38,7 @@
         players: [],
         bullets: [],
         labels: [],
-        zoom: { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale' },
+        zoom: { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale', sourceScale: null, baseScale: BACKGROUND_RECT_BASE_SCALE },
         counts: {
           total: 0,
           players: 0,
@@ -222,7 +224,47 @@
         return bestKey || trackerState.zoom.current || 1;
       };
 
-      const chooseZoom = (transformSamples, entitySamples) => {
+
+      const isObjectLikeFillStyle = (fillStyle) => fillStyle && typeof fillStyle === 'object';
+
+      const zoomFromBackgroundRect = (entities) => {
+        const candidates = entities.filter((entity) => {
+          if (!entity || entity.kind !== 'rectangle' || entity.drawMode !== 'fill') return false;
+          if (!isObjectLikeFillStyle(entity.fillStyle)) return false;
+          return Number.isFinite(entity.transformScale) && entity.transformScale > 0.05;
+        });
+
+        if (!candidates.length) return null;
+
+        // Keep the largest rectangle, this matches the world/background-like draw call.
+        const pick = candidates
+          .map((entity) => {
+            const b = entity.bounds;
+            const area = b ? Math.max(0, (b.maxX - b.minX) * (b.maxY - b.minY)) : 0;
+            return { entity, area };
+          })
+          .sort((a, b) => b.area - a.area)[0]?.entity;
+
+        if (!pick) return null;
+
+        const scale = pick.transformScale;
+        if (!Number.isFinite(scale) || scale <= 0 || !Number.isFinite(BACKGROUND_RECT_BASE_SCALE) || BACKGROUND_RECT_BASE_SCALE <= 0) {
+          return null;
+        }
+
+        return {
+          value: scale / BACKGROUND_RECT_BASE_SCALE,
+          method: 'background-rect-transformScale',
+          sourceScale: scale,
+        };
+      };
+
+      const chooseZoom = (entities, transformSamples, entitySamples) => {
+        const bgZoom = zoomFromBackgroundRect(entities);
+        if (bgZoom && Number.isFinite(bgZoom.value) && bgZoom.value > 0.01 && bgZoom.value < 20) {
+          return bgZoom;
+        }
+
         const wasmZoom = zoomFromWasm();
         if (wasmZoom && Number.isFinite(wasmZoom.value) && wasmZoom.value > 0.01) {
           return wasmZoom;
@@ -589,13 +631,15 @@
           const transformZoomSamples = frameTransformEvents
             .filter((value) => Number.isFinite(value) && value > 0.05 && value < 20);
 
-          const zoomChoice = chooseZoom(transformZoomSamples, entityZoomSamples);
+          const zoomChoice = chooseZoom(trackerState.entities, transformZoomSamples, entityZoomSamples);
           const zoomLevel = zoomChoice.value;
           trackerState.zoom = {
             current: zoomLevel,
             samples: transformZoomSamples.slice(0, 100),
             fallbackSamples: entityZoomSamples.slice(0, 100),
             method: zoomChoice.method,
+            sourceScale: zoomChoice.sourceScale ?? null,
+            baseScale: BACKGROUND_RECT_BASE_SCALE,
           };
 
           for (const entity of trackerState.entities) {
@@ -648,7 +692,7 @@
           trackerState.labels = [];
           trackerState.counts = updateCounts([]);
           frameTransformEvents.length = 0;
-          trackerState.zoom = { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale' };
+          trackerState.zoom = { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale', sourceScale: null, baseScale: BACKGROUND_RECT_BASE_SCALE };
         },
       };
     };
