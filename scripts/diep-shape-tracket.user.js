@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Diep.io Shape Tracker
 // @namespace    https://diep.io/
-// @version      1.2.0
+// @version      1.3.0
 // @description  Capture rendered entities (shapes, players, bullets, cannons) and expose them in the browser console.
 // @author       codex
 // @match        https://diep.io/*
@@ -36,7 +36,7 @@
         players: [],
         bullets: [],
         labels: [],
-        zoom: { current: 1, samples: [], method: 'transform-dominant-scale' },
+        zoom: { current: 1, samples: [], method: 'setTransform-dominant-scale' },
         counts: {
           total: 0,
           players: 0,
@@ -54,6 +54,7 @@
       };
 
       const frameShapes = [];
+      const frameTransformEvents = [];
 
       const normalizeColor = (value) => {
         if (!value || typeof value !== 'string') return '';
@@ -126,6 +127,19 @@
           }
         }
         return bestKey || trackerState.zoom.current || 1;
+      };
+
+      const chooseZoom = (transformSamples, entitySamples) => {
+        const transformZoom = dominantZoom(transformSamples);
+        if (Number.isFinite(transformZoom) && transformZoom > 0.05 && transformZoom < 20) {
+          return { value: transformZoom, method: 'setTransform-dominant-scale' };
+        }
+
+        const fallbackZoom = dominantZoom(entitySamples);
+        return {
+          value: Number.isFinite(fallbackZoom) && fallbackZoom > 0.05 && fallbackZoom < 20 ? fallbackZoom : 1,
+          method: 'entity-transform-dominant-scale',
+        };
       };
 
       const classifyPathKind = (commands) => {
@@ -246,6 +260,36 @@
         strokeRect: contextProto.strokeRect,
         fillText: contextProto.fillText,
         strokeText: contextProto.strokeText,
+        setTransform: contextProto.setTransform,
+        transform: contextProto.transform,
+        scale: contextProto.scale,
+      };
+
+
+      const captureTransformEvent = (ctx) => {
+        if (!trackerState.enabled) return;
+        const m = ctx.getTransform();
+        const scale = transformScale(m);
+        if (!Number.isFinite(scale) || scale <= 0) return;
+        frameTransformEvents.push(scale);
+      };
+
+      contextProto.setTransform = function (...args) {
+        const out = original.setTransform.apply(this, args);
+        captureTransformEvent(this);
+        return out;
+      };
+
+      contextProto.transform = function (...args) {
+        const out = original.transform.apply(this, args);
+        captureTransformEvent(this);
+        return out;
+      };
+
+      contextProto.scale = function (...args) {
+        const out = original.scale.apply(this, args);
+        captureTransformEvent(this);
+        return out;
       };
 
       contextProto.beginPath = function (...args) {
@@ -439,14 +483,19 @@
 
           trackerState.entities = frameShapes.splice(0, frameShapes.length);
 
-          const zoomSamples = trackerState.entities
+          const entityZoomSamples = trackerState.entities
             .map((entity) => entity.transformScale)
             .filter((value) => Number.isFinite(value) && value > 0.05 && value < 20);
-          const zoomLevel = dominantZoom(zoomSamples);
+          const transformZoomSamples = frameTransformEvents
+            .filter((value) => Number.isFinite(value) && value > 0.05 && value < 20);
+
+          const zoomChoice = chooseZoom(transformZoomSamples, entityZoomSamples);
+          const zoomLevel = zoomChoice.value;
           trackerState.zoom = {
             current: zoomLevel,
-            samples: zoomSamples.slice(0, 100),
-            method: 'transform-dominant-scale',
+            samples: transformZoomSamples.slice(0, 100),
+            fallbackSamples: entityZoomSamples.slice(0, 100),
+            method: zoomChoice.method,
           };
 
           for (const entity of trackerState.entities) {
@@ -464,6 +513,8 @@
           );
           trackerState.labels = trackerState.entities.filter((entity) => entity.kind === 'text');
           trackerState.counts = updateCounts(trackerState.entities);
+
+          frameTransformEvents.length = 0;
 
           window.__diepShapeState = trackerState;
           callback(timestamp);
@@ -491,7 +542,8 @@
           trackerState.bullets = [];
           trackerState.labels = [];
           trackerState.counts = updateCounts([]);
-          trackerState.zoom = { current: 1, samples: [], method: 'transform-dominant-scale' };
+          frameTransformEvents.length = 0;
+          trackerState.zoom = { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale' };
         },
       };
     };
