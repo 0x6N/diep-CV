@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Diep.io Shape Tracker
 // @namespace    https://diep.io/
-// @version      1.3.0
+// @version      1.4.0
 // @description  Capture rendered entities (shapes, players, bullets, cannons) and expose them in the browser console.
 // @author       codex
 // @match        https://diep.io/*
@@ -36,7 +36,7 @@
         players: [],
         bullets: [],
         labels: [],
-        zoom: { current: 1, samples: [], method: 'setTransform-dominant-scale' },
+        zoom: { current: 1, samples: [], fallbackSamples: [], method: 'setTransform-dominant-scale' },
         counts: {
           total: 0,
           players: 0,
@@ -55,6 +55,99 @@
 
       const frameShapes = [];
       const frameTransformEvents = [];
+
+      const wasmState = {
+        instance: null,
+        exports: null,
+        zoomProbe: null,
+      };
+
+
+      const installWasmHooks = () => {
+        if (window.__diepShapeTrackerWasmHookInstalled) return;
+        window.__diepShapeTrackerWasmHookInstalled = true;
+
+        const captureInstance = (instance) => {
+          if (!instance || !instance.exports) return;
+          wasmState.instance = instance;
+          wasmState.exports = instance.exports;
+          wasmState.zoomProbe = null;
+        };
+
+        const originalInstantiate = WebAssembly.instantiate.bind(WebAssembly);
+        WebAssembly.instantiate = async (...args) => {
+          const out = await originalInstantiate(...args);
+          if (out && out.instance) captureInstance(out.instance);
+          else if (out instanceof WebAssembly.Instance) captureInstance(out);
+          return out;
+        };
+
+        const originalInstantiateStreaming = WebAssembly.instantiateStreaming
+          ? WebAssembly.instantiateStreaming.bind(WebAssembly)
+          : null;
+        if (originalInstantiateStreaming) {
+          WebAssembly.instantiateStreaming = async (...args) => {
+            const out = await originalInstantiateStreaming(...args);
+            if (out && out.instance) captureInstance(out.instance);
+            return out;
+          };
+        }
+      };
+
+      const buildWasmZoomProbe = () => {
+        const exp = wasmState.exports;
+        if (!exp) return null;
+
+        const likely = [];
+        for (const [name, value] of Object.entries(exp)) {
+          if (!/zoom|camera|fov|scale/i.test(name)) continue;
+
+          if (typeof value === 'function' && value.length === 0) {
+            likely.push({ kind: 'fn', name, value });
+          } else if (typeof WebAssembly.Global !== 'undefined' && value instanceof WebAssembly.Global) {
+            likely.push({ kind: 'global', name, value });
+          }
+        }
+
+        for (const candidate of likely) {
+          try {
+            const v = candidate.kind === 'fn' ? candidate.value() : candidate.value.value;
+            if (Number.isFinite(v) && v > 0.01 && v < 100) {
+              return candidate;
+            }
+          } catch {}
+        }
+
+        return null;
+      };
+
+      const zoomFromWasm = () => {
+        if (!wasmState.exports) return null;
+
+        if (!wasmState.zoomProbe) {
+          wasmState.zoomProbe = buildWasmZoomProbe();
+        }
+
+        const probe = wasmState.zoomProbe;
+        if (!probe) return null;
+
+        try {
+          const value = probe.kind === 'fn' ? probe.value() : probe.value.value;
+          if (Number.isFinite(value) && value > 0.01 && value < 100) {
+            return {
+              value,
+              method:
+                probe.kind === 'fn'
+                  ? `wasm-export-function:${probe.name}`
+                  : `wasm-export-global:${probe.name}`,
+            };
+          }
+        } catch {
+          wasmState.zoomProbe = null;
+        }
+
+        return null;
+      };
 
       const normalizeColor = (value) => {
         if (!value || typeof value !== 'string') return '';
@@ -130,6 +223,11 @@
       };
 
       const chooseZoom = (transformSamples, entitySamples) => {
+        const wasmZoom = zoomFromWasm();
+        if (wasmZoom && Number.isFinite(wasmZoom.value) && wasmZoom.value > 0.01) {
+          return wasmZoom;
+        }
+
         const transformZoom = dominantZoom(transformSamples);
         if (Number.isFinite(transformZoom) && transformZoom > 0.05 && transformZoom < 20) {
           return { value: transformZoom, method: 'setTransform-dominant-scale' };
@@ -243,6 +341,8 @@
 
         ctx.__diepPathCommands = [];
       };
+
+      installWasmHooks();
 
       const contextProto = window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype;
       if (!contextProto) return;
@@ -528,6 +628,11 @@
         getBullets: () => trackerState.bullets,
         byType: (entityType) => trackerState.entities.filter((entity) => entity.entityType === entityType),
         getZoom: () => trackerState.zoom,
+        getWasmInfo: () => ({
+          hasInstance: !!wasmState.instance,
+          exportKeys: wasmState.exports ? Object.keys(wasmState.exports) : [],
+          zoomProbe: wasmState.zoomProbe ? { kind: wasmState.zoomProbe.kind, name: wasmState.zoomProbe.name } : null,
+        }),
         enable: () => {
           trackerState.enabled = true;
         },
