@@ -10,12 +10,13 @@ A ready-to-install userscript is available at:
 
 - Tracks canvas-rendered entities every frame.
 - Stores data in `window.__diepShapeState`.
+- Estimates current in-game zoom from dominant canvas transform scale each frame (`state.zoom`).
 - Differentiates entities by color + geometry:
   - `#FC7677` → triangle
   - `#768DFC` → pentagon
   - `#FFE869` → square
-  - `#00B2E1` → `playerSelf` / `bulletSelf` (radius-based)
-  - `#F14E54` → `playerEnemy` / `bulletEnemy` (radius-based)
+  - `#00B2E1` → `playerSelf` / `bulletSelf` (zoom-normalized radius)
+  - `#F14E54` → `playerEnemy` / `bulletEnemy` (zoom-normalized radius)
   - `#999999` → cannon
 
 ### Console API
@@ -26,6 +27,7 @@ A ready-to-install userscript is available at:
 - `diepShapes.getPlayers()`
 - `diepShapes.getBullets()`
 - `diepShapes.byType('playerSelf')`
+- `diepShapes.getZoom()`
 - `diepShapes.enable()` / `diepShapes.disable()` / `diepShapes.clear()`
 
 ### Install

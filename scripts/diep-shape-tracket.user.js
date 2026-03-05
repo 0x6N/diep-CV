@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Diep.io Shape Tracker
 // @namespace    https://diep.io/
-// @version      1.1.0
+// @version      1.2.0
 // @description  Capture rendered entities (shapes, players, bullets, cannons) and expose them in the browser console.
 // @author       codex
 // @match        https://diep.io/*
@@ -36,6 +36,7 @@
         players: [],
         bullets: [],
         labels: [],
+        zoom: { current: 1, samples: [], method: 'transform-dominant-scale' },
         counts: {
           total: 0,
           players: 0,
@@ -100,6 +101,33 @@
         };
       };
 
+      const transformScale = (matrix) => {
+        const sx = Math.hypot(matrix.a, matrix.b);
+        const sy = Math.hypot(matrix.c, matrix.d);
+        if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx <= 0 || sy <= 0) return 1;
+        return (sx + sy) / 2;
+      };
+
+      const dominantZoom = (samples) => {
+        if (!samples.length) return trackerState.zoom.current || 1;
+        const buckets = new Map();
+        for (const sample of samples) {
+          if (!Number.isFinite(sample) || sample <= 0) continue;
+          const key = Math.round(sample * 100) / 100;
+          buckets.set(key, (buckets.get(key) || 0) + 1);
+        }
+        if (!buckets.size) return trackerState.zoom.current || 1;
+        let bestKey = null;
+        let bestCount = -1;
+        for (const [key, count] of buckets.entries()) {
+          if (count > bestCount) {
+            bestCount = count;
+            bestKey = key;
+          }
+        }
+        return bestKey || trackerState.zoom.current || 1;
+      };
+
       const classifyPathKind = (commands) => {
         const hasArc = commands.some((command) => command.type === 'arc');
         const hasLine = commands.some((command) => command.type === 'lineTo');
@@ -129,11 +157,13 @@
         return vertices + 1;
       };
 
-      const inferEntityType = (shape) => {
+      const inferEntityType = (shape, zoomLevel) => {
         const fill = normalizeColor(shape.fillStyle);
         const stroke = normalizeColor(shape.strokeStyle);
         const color = fill || stroke;
-        const radius = shape.radius || 0;
+        const screenRadius = shape.radius || 0;
+        const zoomSafe = Number.isFinite(zoomLevel) && zoomLevel > 0 ? zoomLevel : 1;
+        const normalizedRadius = screenRadius / zoomSafe;
 
         if (color === ENTITY_COLORS.cannon) return 'cannon';
 
@@ -147,11 +177,11 @@
         if (shape.kind === 'rectangle' && color === ENTITY_COLORS.square) return 'square';
 
         if (shape.kind === 'circle' && color === ENTITY_COLORS.self) {
-          return radius >= 9 ? 'playerSelf' : 'bulletSelf';
+          return normalizedRadius >= 9 ? 'playerSelf' : 'bulletSelf';
         }
 
         if (shape.kind === 'circle' && color === ENTITY_COLORS.enemy) {
-          return radius >= 9 ? 'playerEnemy' : 'bulletEnemy';
+          return normalizedRadius >= 9 ? 'playerEnemy' : 'bulletEnemy';
         }
 
         if (color === ENTITY_COLORS.self) return 'selfColored';
@@ -164,12 +194,13 @@
         if (!trackerState.enabled || !ctx.__diepPathCommands?.length) return;
 
         const commands = ctx.__diepPathCommands.map((command) => ({ ...command }));
+        const matrix = ctx.getTransform();
+        const scale = transformScale(matrix);
         const points = commands.flatMap(pointsFromCommand);
         const bounds = shapeBoundsFromPoints(points);
         const kind = classifyPathKind(commands);
         const firstArc = commands.find((command) => command.type === 'arc');
         const edges = kind === 'polygon' ? inferPolygonEdges(commands) : 0;
-
         const shape = {
           drawMode,
           kind,
@@ -181,6 +212,7 @@
           bounds,
           commands,
           radius: firstArc ? firstArc.transformedRadius : null,
+          transformScale: scale,
           position: bounds
             ? {
                 x: (bounds.minX + bounds.maxX) / 2,
@@ -189,7 +221,10 @@
             : null,
         };
 
-        shape.entityType = inferEntityType(shape);
+        const zoomLevel = trackerState.zoom.current || 1;
+        shape.zoom = zoomLevel;
+        shape.zoomNormalizedRadius = shape.radius != null ? shape.radius / zoomLevel : null;
+        shape.entityType = inferEntityType(shape, zoomLevel);
         frameShapes.push(shape);
 
         ctx.__diepPathCommands = [];
@@ -305,6 +340,7 @@
         ];
         const bounds = shapeBoundsFromPoints(points);
 
+        const scale = transformScale(matrix);
         const shape = {
           drawMode: mode,
           kind: 'rectangle',
@@ -321,10 +357,14 @@
               }
             : null,
           radius: null,
+          transformScale: scale,
           commands: [{ type: 'rect', x, y, width, height, points }],
         };
 
-        shape.entityType = inferEntityType(shape);
+        const zoomLevel = trackerState.zoom.current || 1;
+        shape.zoom = zoomLevel;
+        shape.zoomNormalizedRadius = shape.radius != null ? shape.radius / zoomLevel : null;
+        shape.entityType = inferEntityType(shape, zoomLevel);
         frameShapes.push(shape);
       };
 
@@ -341,6 +381,7 @@
       const captureText = (ctx, mode, text, x, y) => {
         if (!trackerState.enabled) return;
         const matrix = ctx.getTransform();
+        const scale = transformScale(matrix);
         const shape = {
           drawMode: mode,
           kind: 'text',
@@ -353,6 +394,7 @@
           position: matrixPoint(matrix, x, y),
           bounds: null,
           radius: null,
+          transformScale: scale,
           commands: [{ type: 'text', x, y, text: String(text) }],
           entityType: 'text',
         };
@@ -396,6 +438,23 @@
           }
 
           trackerState.entities = frameShapes.splice(0, frameShapes.length);
+
+          const zoomSamples = trackerState.entities
+            .map((entity) => entity.transformScale)
+            .filter((value) => Number.isFinite(value) && value > 0.05 && value < 20);
+          const zoomLevel = dominantZoom(zoomSamples);
+          trackerState.zoom = {
+            current: zoomLevel,
+            samples: zoomSamples.slice(0, 100),
+            method: 'transform-dominant-scale',
+          };
+
+          for (const entity of trackerState.entities) {
+            entity.zoom = zoomLevel;
+            entity.zoomNormalizedRadius = entity.radius != null ? entity.radius / zoomLevel : null;
+            entity.entityType = inferEntityType(entity, zoomLevel);
+          }
+
           trackerState.shapes = trackerState.entities;
           trackerState.players = trackerState.entities.filter(
             (entity) => entity.entityType === 'playerSelf' || entity.entityType === 'playerEnemy',
@@ -417,6 +476,7 @@
         getPlayers: () => trackerState.players,
         getBullets: () => trackerState.bullets,
         byType: (entityType) => trackerState.entities.filter((entity) => entity.entityType === entityType),
+        getZoom: () => trackerState.zoom,
         enable: () => {
           trackerState.enabled = true;
         },
@@ -431,6 +491,7 @@
           trackerState.bullets = [];
           trackerState.labels = [];
           trackerState.counts = updateCounts([]);
+          trackerState.zoom = { current: 1, samples: [], method: 'transform-dominant-scale' };
         },
       };
     };
