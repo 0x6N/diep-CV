@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Diep.io Shape Tracker
 // @namespace    https://diep.io/
-// @version      1.5.0
+// @version      1.6.0
 // @description  Capture rendered entities (shapes, players, bullets, cannons) and expose them in the browser console.
 // @author       codex
 // @match        https://diep.io/*
@@ -335,7 +335,7 @@
         }
 
         if (shape.kind === 'circle' && color === ENTITY_COLORS.enemy) {
-          return normalizedRadius >= 9 ? 'playerEnemy' : 'bulletEnemy';
+          return normalizedRadius >= 32.9 ? 'playerEnemy' : 'bulletEnemy';
         }
 
         if (color === ENTITY_COLORS.self) return 'selfColored';
