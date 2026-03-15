@@ -331,7 +331,7 @@
         if (shape.kind === 'rectangle' && color === ENTITY_COLORS.square) return 'square';
 
         if (shape.kind === 'circle' && color === ENTITY_COLORS.self) {
-          return normalizedRadius >= 9 ? 'playerSelf' : 'bulletSelf';
+          return normalizedRadius >= 32.9 ? 'playerSelf' : 'bulletSelf';
         }
 
         if (shape.kind === 'circle' && color === ENTITY_COLORS.enemy) {
